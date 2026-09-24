@@ -101,6 +101,15 @@ def grlex_key(exp: tuple[int, ...]) -> tuple[int, tuple[int, ...]]:
     return (sum(exp), exp)
 
 
+def lex_key(exp: tuple[int, ...]) -> tuple[int, ...]:
+    """纯 lex（字典序）排序键，``x1 > x2 > ... > xn``；键越大，单项式越大。
+
+    指数元组本身的 Python 字典序就是 lex：先比第一分量（x1 的指数），
+    相同再比下一个。例如二元情形 ``x > y > 1`` 且 ``x^2 > x*y > x > y^2``。
+    """
+    return tuple(exp)
+
+
 class Poly:
     """不可变稀疏多项式。
 
@@ -220,22 +229,29 @@ class Poly:
 
     # ------------------------------------------------------------- 首项相关
 
-    def lm(self) -> tuple[int, ...]:
-        """首项单项式（leading monomial），零多项式抛 :class:`ZeroPolynomialError`。"""
+    def leading(self, key=grlex_key) -> tuple[tuple[int, ...], Fraction]:
+        """按给定次序键取首项 ``(单项式, 系数)``；默认 grlex。
+
+        算法层在 lex 等次序下复用本方法；零多项式抛
+        :class:`ZeroPolynomialError`。
+        """
         if not self._terms:
-            raise ZeroPolynomialError("零多项式没有首项单项式")
-        return max(self._terms, key=grlex_key)
+            raise ZeroPolynomialError("零多项式没有首项")
+        exp = max(self._terms, key=key)
+        return exp, self._terms[exp]
+
+    def lm(self) -> tuple[int, ...]:
+        """首项单项式（leading monomial），固定 grlex；零多项式抛
+        :class:`ZeroPolynomialError`。其他次序请用 :meth:`leading`。"""
+        return self.leading()[0]
 
     def lc(self) -> Fraction:
-        """首项系数。"""
-        if not self._terms:
-            raise ZeroPolynomialError("零多项式没有首项系数")
-        return self._terms[self.lm()]
+        """首项系数（固定 grlex；其他次序请用 :meth:`leading`）。"""
+        return self.leading()[1]
 
     def lt(self) -> tuple[tuple[int, ...], Fraction]:
-        """返回 ``(首项单项式, 首项系数)``。"""
-        exp = self.lm()
-        return exp, self._terms[exp]
+        """返回 grlex 下的 ``(首项单项式, 首项系数)``。"""
+        return self.leading()
 
     # ----------------------------------------------------------------- 运算
 

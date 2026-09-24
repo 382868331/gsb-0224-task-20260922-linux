@@ -56,17 +56,26 @@ def is_zero(a):
     return not a
 
 
-def key(exp):
+def key_grlex(exp):
     """grlex 排序键：总次数优先，并列按指数向量字典序（x1 优先）。"""
     return (sum(exp), exp)
 
 
-def lm(a):
+def key_lex(exp):
+    """纯 lex 排序键：指数向量自身的字典序（x1 > x2 > ...）。"""
+    return tuple(exp)
+
+
+# 旧名字保留给既有调用；默认 grlex。
+key = key_grlex
+
+
+def lm(a, key=key_grlex):
     return max(a, key=key)
 
 
-def lc(a):
-    return a[lm(a)]
+def lc(a, key=key_grlex):
+    return a[lm(a, key)]
 
 
 def divides(u, v):
@@ -83,44 +92,44 @@ def monom(n, exp, coef=Fraction(1)):
 
 # ------------------------------------------------------------------- 除法/约化
 
-def remainder(f, divisors):
+def remainder(f, divisors, key=key_grlex):
     """f 对除式列表反复取首项约化得到的余式（依赖除式顺序，与教科书一致）。"""
     r = {}
     p = f
     while p:
-        e, c = lm(p), lc(p)
+        e, c = lm(p, key), lc(p, key)
         hit = None
         for g in divisors:
-            if divides(lm(g), e):
+            if divides(lm(g, key), e):
                 hit = g
                 break
         if hit is None:
             r = add(r, monom(len(e), e, c))
             p = sub(p, monom(len(e), e, c))
         else:
-            ge, gc = lm(hit), lc(hit)
+            ge, gc = lm(hit, key), lc(hit, key)
             shift = tuple(a - b for a, b in zip(e, ge))
             qterm = monom(len(e), shift, c / gc)
             p = sub(p, mul(qterm, hit))
     return r
 
 
-def divide_full(f, divisors):
+def divide_full(f, divisors, key=key_grlex):
     """返回 (商列表, 余式)，满足 f = sum q_i g_i + r。"""
     if f:
-        n = len(lm(f))
+        n = len(lm(f, key))
     elif divisors:
-        n = len(lm(divisors[0]))
+        n = len(lm(divisors[0], key))
     else:
         n = 0
     qs = [{} for _ in divisors]
     r = {}
     p = f
     while p:
-        e, c = lm(p), lc(p)
+        e, c = lm(p, key), lc(p, key)
         hit = None
         for i, g in enumerate(divisors):
-            if divides(lm(g), e):
+            if divides(lm(g, key), e):
                 hit = i
                 break
         if hit is None:
@@ -128,8 +137,8 @@ def divide_full(f, divisors):
             p = sub(p, monom(n, e, c))
         else:
             g = divisors[hit]
-            shift = tuple(a - b for a, b in zip(e, lm(g)))
-            qterm = monom(n, shift, c / lc(g))
+            shift = tuple(a - b for a, b in zip(e, lm(g, key)))
+            qterm = monom(n, shift, c / lc(g, key))
             qs[hit] = add(qs[hit], qterm)
             p = sub(p, mul(qterm, g))
     return qs, r
@@ -137,42 +146,46 @@ def divide_full(f, divisors):
 
 # ------------------------------------------------------------------- S 多项式
 
-def s_poly(f, g):
-    l = lcm_exp(lm(f), lm(g))
-    tf = monom(len(l), tuple(a - b for a, b in zip(l, lm(f))), Fraction(1) / lc(f))
-    tg = monom(len(l), tuple(a - b for a, b in zip(l, lm(g))), Fraction(1) / lc(g))
+def s_poly(f, g, key=key_grlex):
+    l = lcm_exp(lm(f, key), lm(g, key))
+    tf = monom(len(l), tuple(a - b for a, b in zip(l, lm(f, key))),
+               Fraction(1) / lc(f, key))
+    tg = monom(len(l), tuple(a - b for a, b in zip(l, lm(g, key))),
+               Fraction(1) / lc(g, key))
     return sub(mul(tf, f), mul(tg, g))
 
 
-def _monic(f):
-    return smul(Fraction(1) / lc(f), f)
+def _monic(f, key=key_grlex):
+    return smul(Fraction(1) / lc(f, key), f)
 
 
 # --------------------------------------------------------------- Buchberger
 
-def reduced_groebner(gens):
+def reduced_groebner(gens, key=key_grlex):
     """朴素 Buchberger + 首一约化，返回按首项降序的 dict 列表。
 
     与被测实现刻意不同：不做首项互素跳过、不用队列，
     每轮对当前所有对取余式（余式按**活动基**约化，保证新首项严格
     扩大首项理想，过程必终止），直到一轮没有新元素。
+
+    ``key`` 选择单项式次序（默认 grlex，可传 :func:`key_lex`）。
     """
     basis = []
     for g in gens:
         if not g:
             continue
-        r = remainder(g, basis)
+        r = remainder(g, basis, key)
         if r:
-            basis.append(_monic(r))
+            basis.append(_monic(r, key))
 
     while True:
         added = False
         size = len(basis)
         for i in range(size):
             for j in range(i + 1, size):
-                r = remainder(s_poly(basis[i], basis[j]), basis)
+                r = remainder(s_poly(basis[i], basis[j], key), basis, key)
                 if r:
-                    basis.append(_monic(r))
+                    basis.append(_monic(r, key))
                     added = True
         if not added:
             break
@@ -180,14 +193,17 @@ def reduced_groebner(gens):
     # 同首项只保留一个（极小化前先去重，避免重复首项互相“整除”）
     uniq, seen = [], set()
     for b in basis:
-        if lm(b) not in seen:
-            seen.add(lm(b))
+        e = lm(b, key)
+        if e not in seen:
+            seen.add(e)
             uniq.append(b)
 
     # 极小化：首项被其他不同的首项严格整除者删除
     minimal = [
         b for b in uniq
-        if not any(b is not k and lm(b) != lm(k) and divides(lm(k), lm(b))
+        if not any(b is not k
+                   and lm(b, key) != lm(k, key)
+                   and divides(lm(k, key), lm(b, key))
                    for k in uniq)
     ]
 
@@ -198,22 +214,22 @@ def reduced_groebner(gens):
         changed = False
         for pos in range(len(reduced)):
             others = reduced[:pos] + reduced[pos + 1:]
-            r = remainder(reduced[pos], others)
-            r = _monic(r) if r else r
+            r = remainder(reduced[pos], others, key)
+            r = _monic(r, key) if r else r
             if r != reduced[pos]:
                 reduced[pos] = r
                 changed = True
 
-    reduced.sort(key=lambda b: key(lm(b)), reverse=True)
+    reduced.sort(key=lambda b: key(lm(b, key)), reverse=True)
     return reduced
 
 
-def ideal_remainder(f, gens):
+def ideal_remainder(f, gens, key=key_grlex):
     """成员判定的独立期望：对独立算出的约化基取余式。"""
-    basis = reduced_groebner(gens)
+    basis = reduced_groebner(gens, key)
     if not basis:
         return dict(f)
-    return remainder(f, basis)
+    return remainder(f, basis, key)
 
 
 def expand(cert_dicts, gen_dicts):
@@ -222,3 +238,35 @@ def expand(cert_dicts, gen_dicts):
     for c, g in zip(cert_dicts, gen_dicts):
         total = add(total, mul(c, g))
     return total
+
+
+# ------------------------------------------------------------------- lex 消元
+
+
+def permute_poly(d, perm):
+    """变量置换：new_exp[pos] = old_exp[perm[pos]]。"""
+    return {tuple(e[k] for k in perm): c for e, c in d.items()}
+
+
+def elimination_basis(gens, eliminate_idx, n):
+    """消元的独立期望：lex 基过滤后映回原变量坐标。
+
+    与被测的 eliminate 刻意独立地实现同一条数学路径（消元定理），
+    但复用本文件自己的朴素 Buchberger，且不导入被测代码。
+    返回按 grlex 首项降序排列的 dict 列表（与被测输出顺序约定一致）。
+    """
+    elim = tuple(sorted(set(eliminate_idx)))
+    rest = tuple(k for k in range(n) if k not in elim)
+    perm = elim + rest
+    inv = [0] * n
+    for pos, k in enumerate(perm):
+        inv[k] = pos
+
+    work = [permute_poly(g, perm) for g in gens]
+    basis = reduced_groebner(work, key=key_lex)
+    out = []
+    for b in basis:
+        if all(all(e[p] == 0 for p in range(len(elim))) for e in b):
+            out.append(permute_poly(b, inv))
+    out.sort(key=lambda b: key_grlex(lm(b, key_grlex)), reverse=True)
+    return out
