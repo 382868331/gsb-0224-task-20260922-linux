@@ -23,6 +23,7 @@ from groebner import (
     Poly,
     check_s_polynomials,
     groebner_basis,
+    ideal_intersection,
     membership,
 )
 
@@ -94,7 +95,32 @@ def main() -> None:
     print(f"  h = {show(outsider)}：{mo.status}，非零余式 = {show(mo.remainder)}")
     assert mo.status == "nonmember"
 
-    # ------------------------------------------------- 2. 实际触发的拒绝边界
+    # --------------------------------------------- 2. 两个有限生成理想的交
+    print("\n" + "=" * 70)
+    print("两个理想的交：内部 t 消元，输出原变量环的双组合证书")
+    print("=" * 70)
+    xv = Poly.variable(1, 0)
+    one1 = Poly.constant(1, 1)
+    i_gen = (xv - one1) * (xv - one1)
+    j_gen = (xv - one1) * (xv + one1)
+    inter = ideal_intersection([i_gen], [j_gen])
+    assert inter.status == "complete"
+    print("  I = <(x-1)**2>, J = <(x-1)(x+1)>")
+    for h, (cert_i, cert_j) in zip(inter.basis, inter.certificates):
+        rebuilt_i = expand(cert_i, [i_gen])
+        rebuilt_j = expand(cert_j, [j_gen])
+        print(f"  交集生成元 h = {h.to_string(('x',))}")
+        print(f"    I 侧证书：h = ({cert_i[0].to_string(('x',))}) * (x-1)**2 "
+              f"= {rebuilt_i.to_string(('x',))}")
+        print(f"    J 侧证书：h = ({cert_j[0].to_string(('x',))}) * "
+              f"(x-1)(x+1) = {rebuilt_j.to_string(('x',))}")
+        assert rebuilt_i == h and rebuilt_j == h
+    tiny_inter = ideal_intersection([i_gen], [j_gen], max_pairs=0)
+    print(f"  max_pairs=0 时状态：{tiny_inter.status}（basis="
+          f"{tuple(map(str, tiny_inter.basis))}，不发布部分不含 t 项）")
+    assert tiny_inter.status == "incomplete" and not tiny_inter.basis
+
+    # ------------------------------------------------- 3. 实际触发的拒绝边界
     print("\n[输入拒绝边界] 系数为 NaN 必须被拒绝（不静默纠正）：")
     try:
         Poly({(1, 0): math.nan}, n=2)
@@ -111,7 +137,7 @@ def main() -> None:
     else:
         raise AssertionError("bool 指数未被拒绝")
 
-    # ----------------------------- 3. 预算耗尽（incomplete）≠ 证明非成员
+    # ----------------------------- 4. 预算耗尽（incomplete）≠ 证明非成员
     print("\n[预算语义] 极小 max_pairs 下：")
     tiny = groebner_basis(gens, max_pairs=0)
     print(f"  status={tiny.status}, reduced={tiny.reduced}")
