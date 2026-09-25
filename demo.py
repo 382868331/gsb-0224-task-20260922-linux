@@ -23,6 +23,7 @@ from groebner import (
     Poly,
     check_s_polynomials,
     groebner_basis,
+    ideal_intersection,
     membership,
 )
 
@@ -121,6 +122,49 @@ def main() -> None:
     mt = membership(probe, gens, max_pairs=0)
     print(f"  对 {show(probe)} 的判定状态为 {mt.status}（预算耗尽时不得宣称 nonmember）")
     assert mt.status in ("inconclusive", "member")
+
+    # ----------------------------- 4. 两个理想的交集（消元变量 t）
+    print("\n[理想交集] I = (x*(x+y), y*(x+y))，J = ((x+y)*(x-1))，求 I 与 J 的交：")
+    i_gens = [
+        Poly({(2, 0): 1, (1, 1): 1}, n=2),   # x*(x+y)
+        Poly({(1, 1): 1, (0, 2): 1}, n=2),   # y*(x+y)
+    ]
+    j_gens = [Poly({(2, 0): 1, (1, 0): -1, (1, 1): 1, (0, 1): -1}, n=2)]  # (x+y)*(x-1)
+    inter = ideal_intersection(i_gens, j_gens)
+    print(f"  状态={inter.status}（消元变量 t 的块次序仅在该入口内部使用）")
+    assert inter.status == "complete"
+    for k, b in enumerate(inter.basis):
+        print(f"  交集生成元 h{k} = {show(b)}")
+
+    print("\n[交集双向证书核验] 每个 h_k 分别展开为 I、J 生成元的组合：")
+    for k, (b, ci, cj) in enumerate(
+            zip(inter.basis, inter.certificates_i, inter.certificates_j)):
+        ok_i = expand(ci, i_gens) == b
+        ok_j = expand(cj, j_gens) == b
+        print(f"  h{k}: 属于 I 的证书展开 {'一致' if ok_i else '不一致'}，"
+              f"属于 J 的证书展开 {'一致' if ok_j else '不一致'}")
+        assert ok_i and ok_j
+
+    print("\n[交集成员复核] 每个 h_k 对 I、J 各自的 Groebner 基余式都为 0：")
+    gb_i = groebner_basis(i_gens)
+    gb_j = groebner_basis(j_gens)
+    for k, b in enumerate(inter.basis):
+        ri = membership(b, i_gens)
+        rj = membership(b, j_gens)
+        print(f"  h{k}: 对 I 余式={show(ri.remainder)}，对 J 余式={show(rj.remainder)}")
+        assert ri.status == "member" and rj.status == "member"
+    assert gb_i.is_complete and gb_j.is_complete
+
+    print("\n[交集边界] 与零理想的交为空基；与单位理想的交等于另一侧：")
+    z = ideal_intersection([Poly.zero(2)], i_gens)
+    u = ideal_intersection([Poly.constant(1, 2)], i_gens)
+    print(f"  (0) ∩ I：状态={z.status}，生成元个数={len(z.basis)}")
+    print(f"  (1) ∩ I：状态={u.status}，生成元={[show(b) for b in u.basis]}")
+    assert z.basis == () and u.status == "complete"
+
+    tiny_i = ideal_intersection(i_gens, j_gens, max_pairs=0)
+    print(f"  零预算下：status={tiny_i.status}（只报 incomplete，不自称完整交集）")
+    assert tiny_i.status == "incomplete" and not tiny_i.reduced
 
     print("\n全部演示计算完成。")
 

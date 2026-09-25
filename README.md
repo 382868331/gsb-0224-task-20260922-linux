@@ -3,8 +3,9 @@
 固定 **graded lex（grlex，次数优先、并列按 x1 > x2 > … 字典序）** 次序、
 **有理数精确系数**的稀疏多变量多项式库，实现除法、S 多项式、Buchberger
 算法、唯一的首一约化 Gröbner 基，并为每个基多项式记录它相对输入生成元的
-**多项式线性组合证书**。支持理想成员判定（余式 + 组合证书）与预算耗尽的
-`incomplete` 语义。
+**多项式线性组合证书**。支持理想成员判定（余式 + 组合证书）、
+两个有限生成理想的**交集**（`ideal_intersection`，消元变量法，
+双向组合证书）与预算耗尽的 `incomplete` 语义。
 
 **纯 Python 3.14.7 标准库实现**（只用 `fractions`、`dataclasses`、
 `collections` 等），不调用任何符号计算第三方库，离线运行，无网络/账号/
@@ -36,6 +37,8 @@ tests/
                   # 不导入被测核心，专门用于给出独立数学期望
   test_poly.py    # 数据结构/次序/运算/除法/S 多项式测试
   test_groebner.py# Gröbner 基/证书/成员判定/预算/边界测试
+  test_intersection.py
+                  # 理想交集：手算例、双向证书、零/单位理想、预算测试
 demo.py           # 固定输入演示
 ```
 
@@ -113,6 +116,36 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
 - `nonmember`：基完整（complete）且余式非零，非零余式即为非成员证据；
 - `inconclusive`：预算在判定前耗尽且余式非零——**不允许**在此时宣称非成员。
 
+### 理想交集
+
+```python
+from groebner import ideal_intersection
+
+res = ideal_intersection(I_gens, J_gens,
+                         max_pairs=2000, max_terms=300, max_steps=5000)
+res.status           # "complete" 或 "incomplete"
+res.basis            # I ∩ J 的一组首一 Gröbner 基（原变量 grlex 次序；
+                     # 不保证是约化基，故 res.reduced 恒为 False）
+res.certificates_i   # res.basis[k] = sum_j certificates_i[k][j] * I_gens[j]
+res.certificates_j   # res.basis[k] = sum_j certificates_j[k][j] * J_gens[j]
+res.generators_i, res.generators_j, res.extended, res.reason
+```
+
+- 方法（消元定理）：引入额外消元变量 `t`，在 `n+1` 变量环中构造
+  `K = t*I + (1-t)*J`，用“`t` 大于一切原变量、原变量块内 grlex”的
+  **块次序**求 `K` 的 Gröbner 基，其中不含 `t` 的元素即生成交集。
+  块次序**只在该入口内部使用**，公开的 grlex 接口行为完全不变。
+- 证书是**原变量环**中的恒等式（扩展证书分别取 `t=1`、`t=0` 得到），
+  不是扩展环里的表达式，可直接独立展开核验。
+- 限制：原变量数 `1 <= n <= 3`（加 `t` 后不超过内核的 4 变量上限）；
+  扩展生成元（`t*g` 与 `(1-t)*h`）总项数同样受 100 项上限约束。
+- 三个预算覆盖**整个消元过程**；任一耗尽时 `status="incomplete"`，
+  此时 `basis` 只含已发现的交元素（每个都确实属于交集、证书合法），
+  **不声明**它生成了整个交集。
+- 零理想（空序列或全零生成元）与单位理想按数学定义处理：
+  与零理想的交是零理想（空基）；与单位理想的交是另一侧本身。
+  两侧序列都为空时无法推断变量数，抛 `InvalidGeneratorError`。
+
 ### 异常
 
 | 异常 | 触发情形 |
@@ -186,8 +219,10 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
 
 - 只支持有理数域 Q、grlex 一种次序、1–4 个变量、总输入项 ≤ 100；
   不宣称兼容其他项序、域（有限域/代数扩域）或行业标准 CAS 行为。
-- 不实现 Gröbner 扇、模块/非交换 Gröbner 基、根理想、消元序专门接口
-  （grlex 下消元关系可通过成员判定与证书展示，见 `demo.py`）。
+- 不实现 Gröbner 扇、模块/非交换 Gröbner 基、根理想；消元类计算只提供
+  `ideal_intersection` 这一个入口（块次序为其内部实现细节，不暴露通用
+  消元序接口；grlex 下消元关系也可通过成员判定与证书展示，见 `demo.py`）。
+- 交集只支持两个**有限生成**理想的交，不提供一般符号代数前端。
 - 中间多项式项数与初等约化步数都可能很大；受 `max_pairs`、`max_terms`、
   `max_steps` 三重预算约束，超出时结果为 `incomplete`/`inconclusive`，
   需要调用方调大对应预算重算。

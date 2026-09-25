@@ -7,6 +7,7 @@
 - Groebner 基：:func:`groebner_basis`、:func:`groebner_basis_of_zero`、
   :func:`check_s_polynomials`、:func:`verify_groebner_basis`；
 - 理想成员：:func:`membership`、:func:`membership_in_zero_ideal`；
+- 理想交集：``ideal_intersection``（消元变量块次序仅在该入口内部使用）；
 - 结果对象：:class:`DivisionResult`、:class:`GroebnerResult`、
   :class:`MembershipResult`；
 - 异常：:class:`GroebnerError`、:class:`InvalidPolynomialError`、
@@ -31,11 +32,13 @@ from .groebner import (
     DEFAULT_MAX_TERMS,
     DivisionResult,
     GroebnerResult,
+    IntersectionResult,
     MembershipResult,
     check_s_polynomials,
     divide,
     groebner_basis,
     groebner_basis_of_zero,
+    ideal_intersection,
     membership,
     membership_in_zero_ideal,
     s_polynomial,
@@ -56,12 +59,14 @@ __all__ = [
     "s_polynomial",
     "groebner_basis",
     "groebner_basis_of_zero",
+    "ideal_intersection",
     "check_s_polynomials",
     "verify_groebner_basis",
     "membership",
     "membership_in_zero_ideal",
     "DivisionResult",
     "GroebnerResult",
+    "IntersectionResult",
     "MembershipResult",
     "GroebnerError",
     "InvalidPolynomialError",

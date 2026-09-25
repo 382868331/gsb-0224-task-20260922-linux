@@ -30,6 +30,7 @@ from .errors import (
     InvalidGeneratorError,
     InvalidPolynomialError,
     ZeroDivisorError,
+    ZeroPolynomialError,
 )
 from .poly import (
     MAX_TOTAL_TERMS,
@@ -131,6 +132,38 @@ class MembershipResult:
     groebner: GroebnerResult
 
 
+@dataclass(frozen=True)
+class IntersectionResult:
+    """两个有限生成理想的交集 I 与 J 之交的计算结果。
+
+    - status == "complete"：basis 是交集理想关于原变量 grlex 次序的
+      一组首一 Groebner 基（不保证是约化基，故 reduced 为 False），
+      每个基多项式同时带有相对 generators_i 与 generators_j
+      的两份组合证书；
+    - status == "incomplete"：消元过程预算耗尽。basis 只含已发现的
+      不含消元变量的元素（每个都确实属于交集、证书合法），但不声明
+      它们生成了整个交集。
+
+    certificates_i[k] 满足 basis[k] = sum_j certificates_i[k][j] * I_j
+    （原变量环中的恒等式，扩展证书已取 t=1）；certificates_j[k] 同理（t=0）。
+    extended 是扩展环上 t*I + (1-t)*J 的 Groebner 基计算结果，供核查。
+    """
+
+    status: str  # "complete" | "incomplete"
+    basis: tuple[Poly, ...]
+    certificates_i: tuple[Certificate, ...]
+    certificates_j: tuple[Certificate, ...]
+    generators_i: tuple[Poly, ...]
+    generators_j: tuple[Poly, ...]
+    reduced: bool
+    reason: str
+    extended: GroebnerResult
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status == "complete"
+
+
 # ----------------------------------------------------------------- 输入校验
 
 
@@ -200,6 +233,26 @@ def _monomial_times(n: int, exp: tuple[int, ...], coef: Fraction) -> Poly:
     return Poly._from_dict({exp: coef}, n)
 
 
+def _lm_with(poly: Poly, key) -> tuple[int, ...]:
+    """按给定单项式排序键取首项单项式（公开接口固定用 grlex_key）。"""
+    if poly.is_zero():
+        raise ZeroPolynomialError("零多项式没有首项单项式")
+    return max(poly.terms, key=key)
+
+
+def _lc_with(poly: Poly, key) -> Fraction:
+    return poly.monomial_coefficient(_lm_with(poly, key))
+
+
+def _elimination_key(exp: tuple[int, ...]) -> tuple:
+    """消元块次序：消元变量 t（第 0 分量）大于一切原变量单项式，原变量块内 grlex。
+
+    仅在 ideal_intersection 内部使用；公开的 grlex 接口不受影响。
+    若某多项式的首项不含 t，则块次序保证它所有项都不含 t（消元性质）。
+    """
+    return (exp[0],) + grlex_key(exp[1:])
+
+
 # --------------------------------------------------------------------- 除法
 
 
@@ -210,6 +263,7 @@ def _reduce(dividend: Poly,
             cert0: Optional[Certificate] = None,
             divisor_certs: Optional[Sequence[Certificate]] = None,
             steps_left: Optional[list[int]] = None,
+            key=grlex_key,
             ) -> tuple[list[Poly], Poly, Optional[Certificate]]:
     """带可选证书跟踪的多元除法（grlex，按除式次序取第一个可整除者）。
 
@@ -229,6 +283,8 @@ def _reduce(dividend: Poly,
     quotients = [Poly.zero(n) for _ in range(s)]
     p = dividend
     remainder = Poly.zero(n)
+    div_lm = [_lm_with(d, key) for d in divisors]
+    div_lc = [d.monomial_coefficient(e) for d, e in zip(divisors, div_lm)]
 
     while not p.is_zero():
         if len(p) > max_terms:
@@ -237,17 +293,17 @@ def _reduce(dividend: Poly,
             steps_left[0] -= 1
             if steps_left[0] < 0:
                 raise _BudgetExhausted("初等约化", 0, 0, kind="steps")
-        lm_p, lc_p = p.lt()
+        lm_p = _lm_with(p, key)
+        lc_p = p.monomial_coefficient(lm_p)
         chosen = -1
-        for i, d in enumerate(divisors):
-            lm_d = d.lm()
-            if all(a >= b for a, b in zip(lm_p, lm_d)):
+        for i in range(s):
+            if all(a >= b for a, b in zip(lm_p, div_lm[i])):
                 chosen = i
                 break
         if chosen >= 0:
             d = divisors[chosen]
-            exp = tuple(a - b for a, b in zip(lm_p, d.lm()))
-            coef = lc_p / d.lc()
+            exp = tuple(a - b for a, b in zip(lm_p, div_lm[chosen]))
+            coef = lc_p / div_lc[chosen]
             term = _monomial_times(n, exp, coef)
             quotients[chosen] = quotients[chosen] + term
             p = p - term * d
@@ -312,24 +368,27 @@ def s_polynomial(f: Poly, g: Poly) -> Poly:
 
 
 def _s_with_cert(i: int, j: int, basis: Sequence[Poly],
-                 certs: Sequence[Certificate]) -> tuple[Poly, Certificate]:
+                 certs: Sequence[Certificate],
+                 key=grlex_key) -> tuple[Poly, Certificate]:
     f, g = basis[i], basis[j]
-    lcm = lcm_monomial(f.lm(), g.lm())
+    flm, glm = _lm_with(f, key), _lm_with(g, key)
+    lcm = lcm_monomial(flm, glm)
     tf = _monomial_times(f.n,
-                         tuple(a - b for a, b in zip(lcm, f.lm())),
-                         Fraction(1, 1) / f.lc())
+                         tuple(a - b for a, b in zip(lcm, flm)),
+                         Fraction(1, 1) / f.monomial_coefficient(flm))
     tg = _monomial_times(g.n,
-                         tuple(a - b for a, b in zip(lcm, g.lm())),
-                         Fraction(1, 1) / g.lc())
+                         tuple(a - b for a, b in zip(lcm, glm)),
+                         Fraction(1, 1) / g.monomial_coefficient(glm))
     s = tf * f - tg * g
     cert = _cert_sub(_cert_linear_map(certs[i], tf),
                      _cert_linear_map(certs[j], tg))
     return s, cert
 
 
-def _coprime_lm(f: Poly, g: Poly) -> bool:
+def _coprime_lm(f: Poly, g: Poly, key=grlex_key) -> bool:
     """首项单项式是否“逐分量不同时为正”（首项互素判据的前提）。"""
-    return all(not (a > 0 and b > 0) for a, b in zip(f.lm(), g.lm()))
+    return all(not (a > 0 and b > 0)
+               for a, b in zip(_lm_with(f, key), _lm_with(g, key)))
 
 
 # ----------------------------------------------------------- Buchberger 主体
@@ -339,7 +398,8 @@ def groebner_basis(generators: Iterable[Poly],
                    *,
                    max_pairs: int = DEFAULT_MAX_PAIRS,
                    max_terms: int = DEFAULT_MAX_TERMS,
-                   max_steps: int = DEFAULT_MAX_STEPS) -> GroebnerResult:
+                   max_steps: int = DEFAULT_MAX_STEPS,
+                   _order_key=grlex_key) -> GroebnerResult:
     """计算首一约化 Groebner 基（固定 grlex 次序）。
 
     零生成元会被忽略（但在证书中保留其输入位置）；重复生成元、不同排列顺序
@@ -380,7 +440,7 @@ def groebner_basis(generators: Iterable[Poly],
         if poly.is_zero():
             return
         _, r, cert_r = _reduce(poly, basis, n, max_terms, cert,
-                               basis_certs, steps_left)
+                               basis_certs, steps_left, _order_key)
         if r.is_zero():
             return
         inv = Fraction(1, 1) / r.lc()
@@ -395,8 +455,9 @@ def groebner_basis(generators: Iterable[Poly],
     def pick_pair() -> tuple[int, int]:
         """正常选择策略：取 lcm(lm) 在 grlex 下最小的关键对。"""
         def pkey(p: tuple[int, int]) -> tuple[int, tuple[int, ...]]:
-            l = lcm_monomial(basis[p[0]].lm(), basis[p[1]].lm())
-            return grlex_key(l)
+            l = lcm_monomial(_lm_with(basis[p[0]], _order_key),
+                             _lm_with(basis[p[1]], _order_key))
+            return _order_key(l)
         return min(pair_set, key=pkey)
 
     def lcm_criterion(i: int, j: int) -> bool:
@@ -406,11 +467,12 @@ def groebner_basis(generators: Iterable[Poly],
         且 (i,k)、(j,k) 都已不在待处理集合（此前已处理/已剔除），
         则 S(i,j) 必约化为 0，可安全跳过。
         """
-        lcm = lcm_monomial(basis[i].lm(), basis[j].lm())
+        lcm = lcm_monomial(_lm_with(basis[i], _order_key),
+                           _lm_with(basis[j], _order_key))
         for k in range(len(basis)):
             if k == i or k == j:
                 continue
-            lm_k = basis[k].lm()
+            lm_k = _lm_with(basis[k], _order_key)
             if all(a >= b for a, b in zip(lcm, lm_k)):
                 ik = (i, k) if i < k else (k, i)
                 jk = (j, k) if j < k else (k, j)
@@ -438,7 +500,7 @@ def groebner_basis(generators: Iterable[Poly],
                     f"关键对预算耗尽：预算允许处理 {max_pairs} 对，"
                     f"第 {processed} 对 ({i},{j}) 无法处理"
                     f"（此外仍有 {len(pair_set)} 个待处理关键对）")
-            if _coprime_lm(basis[i], basis[j]):
+            if _coprime_lm(basis[i], basis[j], _order_key):
                 # Buchberger 第一判据：首项单项式互素 ⇒ S 多项式必约为 0。
                 skipped_coprime += 1
                 continue
@@ -446,10 +508,11 @@ def groebner_basis(generators: Iterable[Poly],
                 # Buchberger 第二判据：lcm 被已处理的第三元素覆盖。
                 skipped_lcm += 1
                 continue
-            s, cert_s = _s_with_cert(i, j, basis, basis_certs)
+            s, cert_s = _s_with_cert(i, j, basis, basis_certs, _order_key)
             try:
                 _, r, cert_r = _reduce(s, basis, n, max_terms,
-                                       cert_s, basis_certs, steps_left)
+                                       cert_s, basis_certs, steps_left,
+                                       _order_key)
             except _BudgetExhausted as exc:
                 return incomplete(budget_message(exc, f"关键对 ({i},{j}) 未完成约化"))
             if not r.is_zero():
@@ -461,7 +524,7 @@ def groebner_basis(generators: Iterable[Poly],
     skipped = skipped_coprime
     try:
         reduced, reduced_certs = _reduce_to_reduced(
-            basis, basis_certs, n, max_terms, steps_left)
+            basis, basis_certs, n, max_terms, steps_left, _order_key)
     except _BudgetExhausted as exc:
         return incomplete(budget_message(exc, "最终约化未完成"))
     return GroebnerResult(
@@ -492,7 +555,8 @@ def _reduce_to_reduced(basis: Sequence[Poly],
                        certs: Sequence[Certificate],
                        n: int,
                        max_terms: int,
-                       steps_left: Optional[list[int]] = None
+                       steps_left: Optional[list[int]] = None,
+                       key=grlex_key
                        ) -> tuple[list[Poly], list[Certificate]]:
     """把 Buchberger 基化为唯一的首一约化基，证书同步变换。
 
@@ -505,7 +569,8 @@ def _reduce_to_reduced(basis: Sequence[Poly],
         changed = False
         for pos, idx in enumerate(kept):
             others = kept[:pos] + kept[pos + 1:]
-            if any(all(a >= b for a, b in zip(basis[idx].lm(), basis[k].lm()))
+            if any(all(a >= b for a, b in zip(_lm_with(basis[idx], key),
+                                              _lm_with(basis[k], key)))
                    for k in others):
                 kept.remove(idx)
                 changed = True
@@ -523,7 +588,7 @@ def _reduce_to_reduced(basis: Sequence[Poly],
             divisors = reduced[:pos] + reduced[pos + 1:]
             dcerts = reduced_certs[:pos] + reduced_certs[pos + 1:]
             _, r, cert_r = _reduce(reduced[pos], divisors, n, max_terms,
-                                   reduced_certs[pos], dcerts, steps_left)
+                                   reduced_certs[pos], dcerts, steps_left, key)
             if r != reduced[pos]:
                 inv = Fraction(1, 1) / r.lc()
                 reduced[pos] = r.scale(inv)
@@ -531,7 +596,7 @@ def _reduce_to_reduced(basis: Sequence[Poly],
                 changed = True
 
     order = sorted(range(len(reduced)),
-                   key=lambda k: grlex_key(reduced[k].lm()), reverse=True)
+                   key=lambda k: key(_lm_with(reduced[k], key)), reverse=True)
     return [reduced[k] for k in order], [reduced_certs[k] for k in order]
 
 
@@ -645,3 +710,147 @@ def membership_in_zero_ideal(f: Poly) -> MembershipResult:
     if f.is_zero():
         return MembershipResult("member", Poly.zero(f.n), (), gb)
     return MembershipResult("nonmember", f, None, gb)
+
+
+# ------------------------------------------------------------- 理想交集
+
+
+def _validate_intersection_side(gens: object, name: str) -> tuple[Poly, ...]:
+    """交集某一侧的生成元校验；与 _validate_generators 类似但允许空序列。"""
+    if isinstance(gens, Poly):
+        raise InvalidGeneratorError(
+            f"{name} 必须是 Poly 的序列（收到单个 Poly；请用 [p] 包裹）")
+    if isinstance(gens, (str, bytes)) or not isinstance(gens, Iterable):
+        raise InvalidGeneratorError(
+            f"{name} 必须是 Poly 的可迭代序列，得到 {type(gens).__name__}")
+    out: list[Poly] = []
+    for idx, g in enumerate(gens):
+        if not isinstance(g, Poly):
+            raise InvalidGeneratorError(
+                f"{name} 第 {idx} 个生成元不是 Poly，"
+                f"得到 {type(g).__name__}: {g!r}")
+        out.append(g)
+    return tuple(out)
+
+
+def _lift_t0(poly: Poly) -> Poly:
+    """把 n 变量多项式嵌入 n+1 变量环（消元变量 t 为第 0 分量，取 t^0）。"""
+    return Poly._from_dict({(0,) + e: c for e, c in poly.terms.items()},
+                           poly.n + 1)
+
+
+def _lift_t1(poly: Poly) -> Poly:
+    """t * poly：嵌入 n+1 变量环并乘上消元变量 t。"""
+    return Poly._from_dict({(1,) + e: c for e, c in poly.terms.items()},
+                           poly.n + 1)
+
+
+def _drop_t(poly: Poly) -> Poly:
+    """去掉第 0 分量（要求多项式本就不含 t；调用方保证）。"""
+    return Poly._from_dict({e[1:]: c for e, c in poly.terms.items()},
+                           poly.n - 1)
+
+
+def _eval_t_one(poly: Poly) -> Poly:
+    """扩展环证书多项式取 t=1：同一原变量单项式的各 t 次幂系数求和。"""
+    out: dict[tuple[int, ...], Fraction] = {}
+    for e, c in poly.terms.items():
+        x = e[1:]
+        out[x] = out.get(x, Fraction(0)) + c
+    return Poly._from_dict(out, poly.n - 1)
+
+
+def _eval_t_zero(poly: Poly) -> Poly:
+    """扩展环证书多项式取 t=0：只保留不含 t 的项。"""
+    return Poly._from_dict({e[1:]: c for e, c in poly.terms.items()
+                            if e[0] == 0}, poly.n - 1)
+
+
+def ideal_intersection(gens_i, gens_j, *, max_pairs=DEFAULT_MAX_PAIRS,
+                       max_terms=DEFAULT_MAX_TERMS,
+                       max_steps=DEFAULT_MAX_STEPS) -> IntersectionResult:
+    """计算两个有限生成理想的交集 I ∩ J 的一组生成元及双向组合证书。
+
+    方法（消元定理）：引入额外消元变量 t，在 n+1 变量环中构造
+    K = t*I + (1-t)*J，用“t 大于一切原变量、原变量块内 grlex”的
+    块次序求 K 的 Groebner 基，则其中不含 t 的元素即生成交集，
+    且其限制到原变量的次序恰为原内核的 grlex。块次序仅在本入口内部
+    使用，公开的 grlex 接口行为不变。
+
+    证书：扩展环中每个基多项式带证书
+    b = sum_j A_j*(t*I_j) + sum_k C_k*((1-t)*J_k)；因 b 不含 t，
+    取 t=1 得 b = sum_j A_j(1,x)*I_j，取 t=0 得
+    b = sum_k C_k(0,x)*J_k——两份证书都在原变量环中，
+    可直接独立展开核验。
+
+    限制：原变量数 n 须满足 1 <= n <= 3（加 t 后不超过内核的 4 变量上限）；
+    扩展生成元总项数同样受 MAX_TOTAL_TERMS 约束。三个预算覆盖整个
+    消元过程（构造扩展基 + 最终约化）；任一耗尽时返回
+    status="incomplete"，此时 basis 只含已发现的交元素，
+    不声明它生成了整个交集。
+
+    零理想（空序列或全零生成元）与单位理想按数学定义处理：
+    与零理想的交是零理想（空基），与单位理想的交是另一侧本身。
+    """
+    max_pairs = _check_budget(max_pairs, "max_pairs")
+    max_terms = _check_budget(max_terms, "max_terms")
+    max_steps = _check_budget(max_steps, "max_steps")
+    gens_i_t = _validate_intersection_side(gens_i, "I 的生成元")
+    gens_j_t = _validate_intersection_side(gens_j, "J 的生成元")
+
+    n: Optional[int] = None
+    for g in gens_i_t + gens_j_t:
+        if n is None:
+            n = g.n
+        elif g.n != n:
+            raise InvalidGeneratorError(
+                f"两侧生成元变量数不一致：出现 {g.n}，此前为 {n}")
+    if n is None:
+        raise InvalidGeneratorError(
+            "两侧生成元序列都为空：零理想需要变量数，"
+            "请至少在一侧给出（零）生成元以确定变量数")
+    if n >= MAX_VARIABLES:
+        raise InvalidGeneratorError(
+            f"原变量数 n={n} 超限：ideal_intersection 要求 1 <= n <= "
+            f"{MAX_VARIABLES - 1}（加消元变量 t 后不超过 {MAX_VARIABLES}）")
+
+    def zero_result() -> IntersectionResult:
+        ext = GroebnerResult("complete", (), (), (), True, 0, 0, "")
+        return IntersectionResult(
+            "complete", (), (), (), gens_i_t, gens_j_t, True, "", ext)
+
+    # 任一侧为零理想（无生成元或全零）时交集为零理想。
+    if not any(not g.is_zero() for g in gens_i_t):
+        return zero_result()
+    if not any(not g.is_zero() for g in gens_j_t):
+        return zero_result()
+
+    # 扩展环生成元：t*I_j 在前（对齐 I 的位置），(1-t)*J_k 在后。
+    ext_gens: list[Poly] = []
+    for g in gens_i_t:
+        ext_gens.append(_lift_t1(g) if not g.is_zero() else Poly.zero(n + 1))
+    for h in gens_j_t:
+        ext_gens.append((_lift_t0(h) - _lift_t1(h))
+                        if not h.is_zero() else Poly.zero(n + 1))
+
+    ext = groebner_basis(ext_gens, max_pairs=max_pairs, max_terms=max_terms,
+                         max_steps=max_steps, _order_key=_elimination_key)
+
+    # 消元：块次序下首项不含 t 的基元素整体不含 t，它们生成交集。
+    p = len(gens_i_t)
+    basis_out: list[Poly] = []
+    certs_i: list[Certificate] = []
+    certs_j: list[Certificate] = []
+    for b, cert in zip(ext.basis, ext.certificates):
+        if _lm_with(b, _elimination_key)[0] != 0:
+            continue
+        basis_out.append(_drop_t(b))
+        certs_i.append(tuple(_eval_t_one(cert[j]) for j in range(p)))
+        certs_j.append(tuple(_eval_t_zero(cert[p + k])
+                             for k in range(len(gens_j_t))))
+
+    status = "complete" if ext.is_complete else "incomplete"
+    return IntersectionResult(
+        status, tuple(basis_out), tuple(certs_i), tuple(certs_j),
+        gens_i_t, gens_j_t, False, ext.reason, ext)
+
