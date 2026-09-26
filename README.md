@@ -6,6 +6,11 @@
 **多项式线性组合证书**。支持理想成员判定（余式 + 组合证书）与预算耗尽的
 `incomplete` 语义。
 
+本轮新增 **次数受限 syzygy**：给定生成元 f_i 与系数次数上限 d，
+`bounded_syzygies` 把 sum(a_i * f_i) = 0（deg a_i <= d）展开成有理数域上的
+有限维线性系统并精确消元，输出该有限空间的规范基与系数列映射。
+它**只**求次数 <= d 的有限维空间，不声称生成完整 syzygy 模。
+
 **纯 Python 3.14.7 标准库实现**（只用 `fractions`、`dataclasses`、
 `collections` 等），不调用任何符号计算第三方库，离线运行，无网络/账号/
 数据库/云依赖。
@@ -21,6 +26,16 @@ python -m unittest discover -s tests -v
 
 # 固定输入现场演示（真实计算，约 0.1 秒，远低于 8 秒要求）
 python demo.py
+
+# 本轮新增功能的演示（真实计算正常与边界结果，远低于 90 秒要求）
+python demo_iteration.py
+```
+
+如需隔离环境，可用标准库 venv（非必需，无第三方依赖）：
+
+```bash
+python -m venv .venv
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 ## 目录结构
@@ -30,13 +45,16 @@ groebner/
   __init__.py     # 公开接口导出
   poly.py         # Poly：稀疏有理系数多项式、grlex 次序、四则运算
   groebner.py     # 除法、S 多项式、Buchberger、首一约化基、成员判定、证书
+  syzygy.py       # bounded_syzygies：次数受限 syzygy 的线性化精确求解
   errors.py       # 异常类型
 tests/
   reference.py    # 独立朴素参考实现（dict 多项式 + 另写的 Buchberger），
                   # 不导入被测核心，专门用于给出独立数学期望
   test_poly.py    # 数据结构/次序/运算/除法/S 多项式测试
   test_groebner.py# Gröbner 基/证书/成员判定/预算/边界测试
+  test_syzygy.py  # 次数受限 syzygy 的独立对照测试
 demo.py           # 固定输入演示
+demo_iteration.py # bounded_syzygies 演示（正常 + 边界）
 ```
 
 ## 公开接口
@@ -115,6 +133,33 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
 
 ### 异常
 
+### 次数受限 syzygy
+
+```python
+from groebner import bounded_syzygies, relation_polynomial
+
+r = bounded_syzygies([x, y], 1)   # 生成元序列 + 系数次数上限 d
+r.basis              # 规范基：每条是 (a_1, ..., a_m)，sum a_i*f_i == 0
+r.dimension          # 解空间维数（== len(basis)）
+r.column_monomials   # 第 k 列对应的 (生成元下标, 单项式指数)：系数列映射
+r.rank, r.num_unknowns, r.num_equations   # 线性系统规模，供维数公式复算
+r.verify(i)          # 独立逐多项式相乘求和核验第 i 条关系
+relation_polynomial(coeffs, gens)  # 独立重算 sum a_i*f_i 的核验原语
+```
+
+- 坐标始终跟随**原始输入顺序**：输入排列时关系逐坐标跟随；零生成元
+  （其系数列全部自由）、重复生成元（含 (1, -1) 方向关系）、常数生成元
+  （迫使其余乘积之和为常数倍）都自然纳入同一线性系统。
+- `basis` 为空元组表示该次数界内**精确证明不存在**非平凡关系
+  （d 太小时不会捏造关系）。
+- 规范基取自 RREF 零空间（每个自由列取 1、其余自由列取 0），
+  对固定列序唯一。
+- 完备性可独立复算：`dimension == num_unknowns - rank`，测试中用
+  独立搭建的矩阵与独立求秩验证。
+- 规模预算：`max_unknowns=20000`、`max_equations=20000`，超出抛
+  `InvalidGeneratorError`（可调大重试）；`max_degree` 必须是非负 int
+  （拒绝 bool/负数/浮点）。
+
 | 异常 | 触发情形 |
 |---|---|
 | `InvalidPolynomialError` | 系数 NaN/Infinity、系数/指数为 `bool`、指数为负或非整数、指数长度与变量数不符、变量数越界等；消息带 `index=` 与指数向量，可定位 |
@@ -192,3 +237,6 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
   `max_steps` 三重预算约束，超出时结果为 `incomplete`/`inconclusive`，
   需要调用方调大对应预算重算。
 - 不含 CLI、服务端、数据库或任何网络功能；终端命令仅用于测试与演示。
+- `bounded_syzygies` 只解次数 <= d 的**有限维**系数空间，不实现
+  Schreyer 定理等完整 syzygy 模算法；线性系统规模受
+  `max_unknowns` / `max_equations` 预算约束。

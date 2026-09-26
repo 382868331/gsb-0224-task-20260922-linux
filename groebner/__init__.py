@@ -42,6 +42,12 @@ from .groebner import (
     verify_groebner_basis,
 )
 from .poly import MAX_TOTAL_TERMS, MAX_VARIABLES, Poly, grlex_key, lcm_monomial
+from .syzygy import (
+    BoundedSyzygyResult,
+    bounded_syzygies,
+    monomials_up_to,
+    relation_polynomial,
+)
 
 __all__ = [
     "Poly",
@@ -60,6 +66,10 @@ __all__ = [
     "verify_groebner_basis",
     "membership",
     "membership_in_zero_ideal",
+    "bounded_syzygies",
+    "relation_polynomial",
+    "monomials_up_to",
+    "BoundedSyzygyResult",
     "DivisionResult",
     "GroebnerResult",
     "MembershipResult",

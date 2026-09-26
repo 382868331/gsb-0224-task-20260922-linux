@@ -222,3 +222,68 @@ def expand(cert_dicts, gen_dicts):
     for c, g in zip(cert_dicts, gen_dicts):
         total = add(total, mul(c, g))
     return total
+
+
+# ------------------------------------------------------- syzygy 线性系统参考
+
+def monomials_upto(n, degree):
+    """n 元、总次数 <= degree 的全部指数（grlex 降序），独立重写。"""
+    out = []
+
+    def rec(pos, remaining, acc):
+        if pos == n - 1:
+            for e in range(remaining + 1):
+                out.append(tuple(acc + [e]))
+            return
+        for e in range(remaining + 1):
+            rec(pos + 1, remaining - e, acc + [e])
+
+    rec(0, degree, [])
+    out.sort(key=lambda e: (sum(e), e), reverse=True)
+    return out
+
+
+def syzygy_matrix(gen_dicts, degree, n):
+    """独立展开次数受限 syzygy 的线性系统。
+
+    返回 (行列表, 列映射)；列映射第 k 项为 (生成元下标, 单项式指数)。
+    与被测核心不共享任何代码。
+    """
+    monoms = monomials_upto(n, degree)
+    columns = [(i, alpha) for i in range(len(gen_dicts)) for alpha in monoms]
+    max_deg_f = max((sum(e) for g in gen_dicts for e in g), default=0)
+    rows = []
+    for beta in monomials_upto(n, degree + max_deg_f):
+        row = [Fraction(0)] * len(columns)
+        for col, (i, alpha) in enumerate(columns):
+            diff = tuple(b - a for a, b in zip(alpha, beta))
+            if all(x >= 0 for x in diff):
+                coef = gen_dicts[i].get(diff)
+                if coef:
+                    row[col] = coef
+        rows.append(row)
+    return rows, columns
+
+
+def rank(rows):
+    """独立高斯消元求有理矩阵的秩（只求秩，不求零空间）。"""
+    mat = [list(r) for r in rows if any(r)]
+    if not mat:
+        return 0
+    ncols = len(mat[0])
+    r = 0
+    for c in range(ncols):
+        pivot = next((k for k in range(r, len(mat)) if mat[k][c]), None)
+        if pivot is None:
+            continue
+        mat[r], mat[pivot] = mat[pivot], mat[r]
+        inv = Fraction(1) / mat[r][c]
+        mat[r] = [v * inv for v in mat[r]]
+        for k in range(len(mat)):
+            if k != r and mat[k][c]:
+                f = mat[k][c]
+                mat[k] = [v - f * w for v, w in zip(mat[k], mat[r])]
+        r += 1
+        if r == len(mat):
+            break
+    return r
