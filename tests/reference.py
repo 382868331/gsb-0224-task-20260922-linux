@@ -222,3 +222,88 @@ def expand(cert_dicts, gen_dicts):
     for c, g in zip(cert_dicts, gen_dicts):
         total = add(total, mul(c, g))
     return total
+
+
+# ------------------------------------------------- 独立线性代数（syzygy 对照）
+
+def monomials_le(n, d):
+    """独立枚举次数 <= d 的单项式指数（递归另一写法），grlex 降序。"""
+    out = []
+
+    def rec(pos, rem, acc):
+        if pos == n:
+            out.append(tuple(acc))
+            return
+        for e in range(rem + 1):
+            rec(pos + 1, rem - e, acc + [e])
+
+    rec(0, d, [])
+    out.sort(key=key, reverse=True)
+    return out
+
+
+def _rref_independent(matrix):
+    """独立另写的精确行最简消元，返回 (rref, 主元列列表)。"""
+    rows = [list(r) for r in matrix]
+    ncols = len(rows[0]) if rows else 0
+    pivots = []
+    r = 0
+    for c in range(ncols):
+        piv = None
+        for k in range(r, len(rows)):
+            if rows[k][c] != 0:
+                piv = k
+                break
+        if piv is None:
+            continue
+        rows[r], rows[piv] = rows[piv], rows[r]
+        inv = Fraction(1) / rows[r][c]
+        rows[r] = [v * inv for v in rows[r]]
+        for k in range(len(rows)):
+            if k != r and rows[k][c] != 0:
+                f = rows[k][c]
+                rows[k] = [v - f * w for v, w in zip(rows[k], rows[r])]
+        pivots.append(c)
+        r += 1
+    return rows, pivots
+
+
+def bounded_syzygy_expectation(gen_dicts, n, d):
+    """独立重建有界 syzygy 线性系统，返回 (秩, 未知量数, 零空间基向量列表)。
+
+    基向量是长度 = 未知量数的 Fraction 列表，列序为
+    (生成元下标 i, 单项式指数)，单项式按 grlex 降序——与被测库约定相同，
+    但枚举、建矩阵、消元全部在此独立实现。
+    """
+    mons = monomials_le(n, d)
+    m = len(gen_dicts)
+    num = m * len(mons)
+    equations = {}
+    for i, g in enumerate(gen_dicts):
+        for j, exp in enumerate(mons):
+            col = i * len(mons) + j
+            for e_f, c in g.items():
+                beta = tuple(a + b for a, b in zip(exp, e_f))
+                row = equations.setdefault(beta, {})
+                row[col] = row.get(col, Fraction(0)) + c
+    matrix = []
+    for beta in sorted(equations, key=key, reverse=True):
+        row = [Fraction(0)] * num
+        for col, c in equations[beta].items():
+            row[col] = c
+        matrix.append(row)
+    rref, pivots = _rref_independent(matrix)
+    pivot_set = set(pivots)
+    basis = []
+    for free in range(num):
+        if free in pivot_set:
+            continue
+        vec = [Fraction(0)] * num
+        vec[free] = Fraction(1)
+        for row_idx, pcol in enumerate(pivots):
+            vec[pcol] = -rref[row_idx][free]
+        lead = next(v for v in vec if v != 0)
+        if lead != 1:
+            vec = [v / lead for v in vec]
+        basis.append(vec)
+    return len(pivots), num, basis

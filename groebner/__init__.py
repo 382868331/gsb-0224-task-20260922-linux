@@ -7,6 +7,8 @@
 - Groebner 基：:func:`groebner_basis`、:func:`groebner_basis_of_zero`、
   :func:`check_s_polynomials`、:func:`verify_groebner_basis`；
 - 理想成员：:func:`membership`、:func:`membership_in_zero_ideal`；
+- 次数有界 syzygy：:func:`bounded_syzygies`、:func:`relation_value`、
+  :func:`monomials_up_to_degree`、:class:`BoundedSyzygyResult`；
 - 结果对象：:class:`DivisionResult`、:class:`GroebnerResult`、
   :class:`MembershipResult`；
 - 异常：:class:`GroebnerError`、:class:`InvalidPolynomialError`、
@@ -42,6 +44,13 @@ from .groebner import (
     verify_groebner_basis,
 )
 from .poly import MAX_TOTAL_TERMS, MAX_VARIABLES, Poly, grlex_key, lcm_monomial
+from .syzygy import (
+    DEFAULT_MAX_UNKNOWNS,
+    BoundedSyzygyResult,
+    bounded_syzygies,
+    monomials_up_to_degree,
+    relation_value,
+)
 
 __all__ = [
     "Poly",
@@ -60,6 +69,11 @@ __all__ = [
     "verify_groebner_basis",
     "membership",
     "membership_in_zero_ideal",
+    "bounded_syzygies",
+    "relation_value",
+    "monomials_up_to_degree",
+    "BoundedSyzygyResult",
+    "DEFAULT_MAX_UNKNOWNS",
     "DivisionResult",
     "GroebnerResult",
     "MembershipResult",
