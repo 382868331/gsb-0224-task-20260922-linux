@@ -39,7 +39,7 @@ from .poly import (
     lcm_monomial,
 )
 
-#: 组合证书：长度等于输入生成元个数（含零生成元的位置），
+#: 组合证书：长度等于输入生成元个数（含零生成元的位置）。
 #: ``certificate[j]`` 是乘在第 j 个输入生成元前的多项式系数。
 Certificate = tuple[Poly, ...]
 
@@ -210,6 +210,7 @@ def _reduce(dividend: Poly,
             cert0: Optional[Certificate] = None,
             divisor_certs: Optional[Sequence[Certificate]] = None,
             steps_left: Optional[list[int]] = None,
+            key=grlex_key,
             ) -> tuple[list[Poly], Poly, Optional[Certificate]]:
     """带可选证书跟踪的多元除法（grlex，按除式次序取第一个可整除者）。
 
@@ -222,10 +223,14 @@ def _reduce(dividend: Poly,
     - ``max_terms``：中间被除式的非零项数上限（防单项多项式膨胀）；
     - ``steps_left``：跨多次调用共享的“初等约化步数”余量（单元素 list，
       原地递减）。项数限制无法约束**项数不多但步数极多**的病态约化，
-      步数预算保证工作量总有上界，使任何输入都会在有限时间内得到
-      complete 或 incomplete 之一。
+    步数预算保证工作量总有上界，使任何输入都会在有限时间内得到
+    complete 或 incomplete 之一。
+
+    key 是单项式排序键（默认 grlex）；饱和计算的消元序会传入其他键。
     """
     s = len(divisors)
+    div_lms = [max(d.terms, key=key) for d in divisors]
+    div_lcs = [d.terms[e] for d, e in zip(divisors, div_lms)]
     quotients = [Poly.zero(n) for _ in range(s)]
     p = dividend
     remainder = Poly.zero(n)
@@ -237,17 +242,18 @@ def _reduce(dividend: Poly,
             steps_left[0] -= 1
             if steps_left[0] < 0:
                 raise _BudgetExhausted("初等约化", 0, 0, kind="steps")
-        lm_p, lc_p = p.lt()
+        p_terms = p.terms
+        lm_p = max(p_terms, key=key)
+        lc_p = p_terms[lm_p]
         chosen = -1
-        for i, d in enumerate(divisors):
-            lm_d = d.lm()
+        for i, lm_d in enumerate(div_lms):
             if all(a >= b for a, b in zip(lm_p, lm_d)):
                 chosen = i
                 break
         if chosen >= 0:
             d = divisors[chosen]
-            exp = tuple(a - b for a, b in zip(lm_p, d.lm()))
-            coef = lc_p / d.lc()
+            exp = tuple(a - b for a, b in zip(lm_p, div_lms[chosen]))
+            coef = lc_p / div_lcs[chosen]
             term = _monomial_times(n, exp, coef)
             quotients[chosen] = quotients[chosen] + term
             p = p - term * d
@@ -312,15 +318,17 @@ def s_polynomial(f: Poly, g: Poly) -> Poly:
 
 
 def _s_with_cert(i: int, j: int, basis: Sequence[Poly],
-                 certs: Sequence[Certificate]) -> tuple[Poly, Certificate]:
+                 certs: Sequence[Certificate],
+                 lms: Sequence[tuple[int, ...]],
+                 lcs: Sequence[Fraction]) -> tuple[Poly, Certificate]:
     f, g = basis[i], basis[j]
-    lcm = lcm_monomial(f.lm(), g.lm())
+    lcm = lcm_monomial(lms[i], lms[j])
     tf = _monomial_times(f.n,
-                         tuple(a - b for a, b in zip(lcm, f.lm())),
-                         Fraction(1, 1) / f.lc())
+                         tuple(a - b for a, b in zip(lcm, lms[i])),
+                         Fraction(1, 1) / lcs[i])
     tg = _monomial_times(g.n,
-                         tuple(a - b for a, b in zip(lcm, g.lm())),
-                         Fraction(1, 1) / g.lc())
+                         tuple(a - b for a, b in zip(lcm, lms[j])),
+                         Fraction(1, 1) / lcs[j])
     s = tf * f - tg * g
     cert = _cert_sub(_cert_linear_map(certs[i], tf),
                      _cert_linear_map(certs[j], tg))
@@ -335,31 +343,27 @@ def _coprime_lm(f: Poly, g: Poly) -> bool:
 # ----------------------------------------------------------- Buchberger 主体
 
 
-def groebner_basis(generators: Iterable[Poly],
-                   *,
-                   max_pairs: int = DEFAULT_MAX_PAIRS,
-                   max_terms: int = DEFAULT_MAX_TERMS,
-                   max_steps: int = DEFAULT_MAX_STEPS) -> GroebnerResult:
-    """计算首一约化 Groebner 基（固定 grlex 次序）。
+def _buchberger_core(gens: tuple[Poly, ...],
+                     n: int,
+                     key,
+                     max_pairs: int,
+                     max_terms: int,
+                     max_steps: int
+                     ) -> tuple[str, list[Poly], list[Certificate],
+                                int, int, int, str]:
+    """Buchberger 主循环（单项式次序由排序键 key 给出）。
 
-    零生成元会被忽略（但在证书中保留其输入位置）；重复生成元、不同排列顺序
-    均产生同一个首一约化基。三个预算任一耗尽都返回 ``status="incomplete"``：
-
-    - ``max_pairs``：处理的关键对数（含跳过的对）；
-    - ``max_terms``：约化中间多项式的非零项数；
-    - ``max_steps``：全部初等约化步数之和（含最终约化与成员判定的取余），
-      用于约束“项数不多但步数极多”的病态约化，保证总有有限运行时间上界。
+    返回 (status, basis, certs, processed, skipped_coprime, skipped_lcm, reason)。
+    status 为 "complete" 时 basis 是该次序下唯一的首一约化 Groebner 基；
+    为 "incomplete" 时 basis 只是当前首一生成元集合（证书仍合法）。
+    输入假定已校验（均为 Poly、变量数一致、预算为非负 int）。
     """
-    max_pairs = _check_budget(max_pairs, "max_pairs")
-    max_terms = _check_budget(max_terms, "max_terms")
-    max_steps = _check_budget(max_steps, "max_steps")
-    gens = _validate_generators(generators)
-    n = gens[0].n
     m = len(gens)
-
     # 全程只构造新列表，结束时一次性发布；中途任何失败都不会产生对外副作用。
     basis: list[Poly] = []
     basis_certs: list[Certificate] = []
+    basis_lms: list[tuple[int, ...]] = []
+    basis_lcs: list[Fraction] = []
     # 待处理关键对集合（无序对，i < j）；配合正常选择策略使用。
     pair_set: set[tuple[int, int]] = set()
     skipped_coprime = 0
@@ -380,23 +384,26 @@ def groebner_basis(generators: Iterable[Poly],
         if poly.is_zero():
             return
         _, r, cert_r = _reduce(poly, basis, n, max_terms, cert,
-                               basis_certs, steps_left)
+                               basis_certs, steps_left, key)
         if r.is_zero():
             return
         inv = Fraction(1, 1) / r.lc()
         r = r.scale(inv)
         cert_r = tuple(c.scale(inv) for c in cert_r)
         k = len(basis)
+        lm_r = max(r.terms, key=key)
         basis.append(r)
         basis_certs.append(cert_r)
+        basis_lms.append(lm_r)
+        basis_lcs.append(r.terms[lm_r])
         for i in range(k):
             pair_set.add((i, k))
 
     def pick_pair() -> tuple[int, int]:
-        """正常选择策略：取 lcm(lm) 在 grlex 下最小的关键对。"""
+        """正常选择策略：取 lcm(lm) 在当前次序下最小的关键对。"""
         def pkey(p: tuple[int, int]) -> tuple[int, tuple[int, ...]]:
-            l = lcm_monomial(basis[p[0]].lm(), basis[p[1]].lm())
-            return grlex_key(l)
+            l = lcm_monomial(basis_lms[p[0]], basis_lms[p[1]])
+            return key(l)
         return min(pair_set, key=pkey)
 
     def lcm_criterion(i: int, j: int) -> bool:
@@ -406,11 +413,11 @@ def groebner_basis(generators: Iterable[Poly],
         且 (i,k)、(j,k) 都已不在待处理集合（此前已处理/已剔除），
         则 S(i,j) 必约化为 0，可安全跳过。
         """
-        lcm = lcm_monomial(basis[i].lm(), basis[j].lm())
+        lcm = lcm_monomial(basis_lms[i], basis_lms[j])
         for k in range(len(basis)):
             if k == i or k == j:
                 continue
-            lm_k = basis[k].lm()
+            lm_k = basis_lms[k]
             if all(a >= b for a, b in zip(lcm, lm_k)):
                 ik = (i, k) if i < k else (k, i)
                 jk = (j, k) if j < k else (k, j)
@@ -418,10 +425,9 @@ def groebner_basis(generators: Iterable[Poly],
                     return True
         return False
 
-    def incomplete(what: str) -> GroebnerResult:
-        return GroebnerResult(
-            "incomplete", tuple(basis), tuple(basis_certs), gens,
-            False, processed, skipped_coprime, what, skipped_lcm)
+    def incomplete(what: str):
+        return ("incomplete", basis, basis_certs,
+                processed, skipped_coprime, skipped_lcm, what)
 
     try:
         for idx, g in enumerate(gens):
@@ -438,7 +444,8 @@ def groebner_basis(generators: Iterable[Poly],
                     f"关键对预算耗尽：预算允许处理 {max_pairs} 对，"
                     f"第 {processed} 对 ({i},{j}) 无法处理"
                     f"（此外仍有 {len(pair_set)} 个待处理关键对）")
-            if _coprime_lm(basis[i], basis[j]):
+            if all(not (a > 0 and b > 0)
+                   for a, b in zip(basis_lms[i], basis_lms[j])):
                 # Buchberger 第一判据：首项单项式互素 ⇒ S 多项式必约为 0。
                 skipped_coprime += 1
                 continue
@@ -446,10 +453,11 @@ def groebner_basis(generators: Iterable[Poly],
                 # Buchberger 第二判据：lcm 被已处理的第三元素覆盖。
                 skipped_lcm += 1
                 continue
-            s, cert_s = _s_with_cert(i, j, basis, basis_certs)
+            s, cert_s = _s_with_cert(i, j, basis, basis_certs,
+                                     basis_lms, basis_lcs)
             try:
                 _, r, cert_r = _reduce(s, basis, n, max_terms,
-                                       cert_s, basis_certs, steps_left)
+                                       cert_s, basis_certs, steps_left, key)
             except _BudgetExhausted as exc:
                 return incomplete(budget_message(exc, f"关键对 ({i},{j}) 未完成约化"))
             if not r.is_zero():
@@ -458,15 +466,40 @@ def groebner_basis(generators: Iterable[Poly],
         # 初始生成元入库阶段触顶同样按 incomplete 返回。
         return incomplete(budget_message(exc, "生成元入库阶段"))
 
-    skipped = skipped_coprime
     try:
         reduced, reduced_certs = _reduce_to_reduced(
-            basis, basis_certs, n, max_terms, steps_left)
+            basis, basis_certs, n, max_terms, steps_left, key)
     except _BudgetExhausted as exc:
         return incomplete(budget_message(exc, "最终约化未完成"))
+    return ("complete", reduced, reduced_certs,
+            processed, skipped_coprime, skipped_lcm, "")
+
+
+def groebner_basis(generators: Iterable[Poly],
+                   *,
+                   max_pairs: int = DEFAULT_MAX_PAIRS,
+                   max_terms: int = DEFAULT_MAX_TERMS,
+                   max_steps: int = DEFAULT_MAX_STEPS) -> GroebnerResult:
+    """计算首一约化 Groebner 基（固定 grlex 次序）。
+
+    零生成元会被忽略（但在证书中保留其输入位置）；重复生成元、不同排列顺序
+    均产生同一个首一约化基。三个预算任一耗尽都返回 incomplete：
+
+    - max_pairs：处理的关键对数（含跳过的对）；
+    - max_terms：约化中间多项式的非零项数；
+    - max_steps：全部初等约化步数之和（含最终约化与成员判定的取余），
+      用于约束“项数不多但步数极多”的病态约化，保证总有有限运行时间上界。
+    """
+    max_pairs = _check_budget(max_pairs, "max_pairs")
+    max_terms = _check_budget(max_terms, "max_terms")
+    max_steps = _check_budget(max_steps, "max_steps")
+    gens = _validate_generators(generators)
+    status, basis, certs, processed, sk_coprime, sk_lcm, reason = \
+        _buchberger_core(gens, gens[0].n, grlex_key,
+                         max_pairs, max_terms, max_steps)
     return GroebnerResult(
-        "complete", tuple(reduced), tuple(reduced_certs), gens,
-        True, processed, skipped, "", skipped_lcm)
+        status, tuple(basis), tuple(certs), gens,
+        status == "complete", processed, sk_coprime, reason, sk_lcm)
 
 
 def groebner_basis_of_zero(n: int,
@@ -492,7 +525,8 @@ def _reduce_to_reduced(basis: Sequence[Poly],
                        certs: Sequence[Certificate],
                        n: int,
                        max_terms: int,
-                       steps_left: Optional[list[int]] = None
+                       steps_left: Optional[list[int]] = None,
+                       key=grlex_key
                        ) -> tuple[list[Poly], list[Certificate]]:
     """把 Buchberger 基化为唯一的首一约化基，证书同步变换。
 
@@ -505,7 +539,8 @@ def _reduce_to_reduced(basis: Sequence[Poly],
         changed = False
         for pos, idx in enumerate(kept):
             others = kept[:pos] + kept[pos + 1:]
-            if any(all(a >= b for a, b in zip(basis[idx].lm(), basis[k].lm()))
+            lms = {i: max(basis[i].terms, key=key) for i in kept}
+            if any(all(a >= b for a, b in zip(lms[idx], lms[k]))
                    for k in others):
                 kept.remove(idx)
                 changed = True
@@ -523,7 +558,7 @@ def _reduce_to_reduced(basis: Sequence[Poly],
             divisors = reduced[:pos] + reduced[pos + 1:]
             dcerts = reduced_certs[:pos] + reduced_certs[pos + 1:]
             _, r, cert_r = _reduce(reduced[pos], divisors, n, max_terms,
-                                   reduced_certs[pos], dcerts, steps_left)
+                                   reduced_certs[pos], dcerts, steps_left, key)
             if r != reduced[pos]:
                 inv = Fraction(1, 1) / r.lc()
                 reduced[pos] = r.scale(inv)
@@ -531,7 +566,8 @@ def _reduce_to_reduced(basis: Sequence[Poly],
                 changed = True
 
     order = sorted(range(len(reduced)),
-                   key=lambda k: grlex_key(reduced[k].lm()), reverse=True)
+                   key=lambda k: key(max(reduced[k].terms, key=key)),
+                   reverse=True)
     return [reduced[k] for k in order], [reduced_certs[k] for k in order]
 
 
@@ -645,3 +681,197 @@ def membership_in_zero_ideal(f: Poly) -> MembershipResult:
     if f.is_zero():
         return MembershipResult("member", Poly.zero(f.n), (), gb)
     return MembershipResult("nonmember", f, None, gb)
+
+
+# ----------------------------------------------------------------- 理想饱和
+
+
+@dataclass(frozen=True)
+class SaturationResult:
+    """饱和理想 I:f^inf = {g : 存在 k 使 f**k * g 属于 I} 的计算结果。
+
+    - status == "complete"：basis 是饱和理想唯一的首一约化 Groebner 基
+      （grlex，变量数与原理想相同，辅助变量 t 不会泄漏）；
+      powers[i] 与 certificates[i] 给出逐基多项式的成员证书：
+      f**powers[i] * basis[i] = sum_j certificates[i][j] * generators[j]，
+      可用多项式加法/乘法独立展开核验；
+    - status == "complete" 但 certificates 为 None：基本身有效，
+      仅证书因项数超过 max_terms 预算而未给出（reason 说明）；
+    - status == "incomplete"：预算耗尽，basis 为空，不声明任何结论。
+    """
+
+    status: str  # "complete" | "incomplete"
+    basis: tuple[Poly, ...]
+    certificates: Optional[tuple[Certificate, ...]]
+    powers: Optional[tuple[int, ...]]
+    generators: tuple[Poly, ...]
+    f: Poly
+    reduced: bool
+    reason: str
+
+
+def _elim_key_last(exp: tuple[int, ...]):
+    """末位变量（辅助变量 t）最大的消元序：先比 t 的次数，再按 grlex 比其余。
+
+    这是合法的消元序：任何含 t 的单项式都大于所有不含 t 的单项式，
+    因此该次序下约化基中首项不含 t 的元素全体落在原多项式环中，
+    且构成消元理想（即饱和理想）的 Groebner 基。
+    """
+    return (exp[-1], grlex_key(exp[:-1]))
+
+
+def _lift_last(p: Poly) -> Poly:
+    """把 n 元多项式嵌入 n+1 元环（新变量在末位，指数为 0）。"""
+    return Poly._from_dict({e + (0,): c for e, c in p.terms.items()}, p.n + 1)
+
+
+def _drop_last(p: Poly) -> Poly:
+    """把不含末位变量的 n+1 元多项式降回 n 元环。"""
+    return Poly._from_dict({e[:-1]: c for e, c in p.terms.items()}, p.n - 1)
+
+
+def _pow_poly(base: Poly, k: int) -> Poly:
+    out = Poly.constant(1, base.n)
+    for _ in range(k):
+        out = out * base
+    return out
+
+
+def _clear_t(cert: Poly, f: Poly, k: int, n: int) -> Poly:
+    """把证书多项式 c(x, t) 变为 sum_a f**(k-a) * c_a(x)（c = sum_a t**a c_a）。
+
+    由 1 - t*f = 0 即 t*f = 1，f**k * c(x, t) 模 (1 - t*f) 等于上式，
+    且两边都不含 t，而 (1 - t*f) 的倍式中只有 0 不含 t，故等式精确成立。
+    """
+    slices: dict[int, dict[tuple[int, ...], Fraction]] = {}
+    for e, c in cert.terms.items():
+        slices.setdefault(e[-1], {})[e[:-1]] = c
+    out = Poly.zero(n)
+    for a, d in slices.items():
+        out = out + _pow_poly(f, k - a) * Poly._from_dict(d, n)
+    return out
+
+
+def saturate(generators: Iterable[Poly],
+             f: Poly,
+             *,
+             max_pairs: int = DEFAULT_MAX_PAIRS,
+             max_terms: int = DEFAULT_MAX_TERMS,
+             max_steps: int = DEFAULT_MAX_STEPS) -> SaturationResult:
+    """计算饱和理想 I:f^inf（Rabinowitsch 技巧 + 消元序），I 由生成元给出。
+
+    方法：在加入辅助变量 t 的扩环中计算 J = I + (1 - t*f) 关于消元序
+    （t 最大，其余变量间仍为 grlex）的首一约化 Groebner 基，取其中不含 t
+    的元素，再整理为原环上 grlex 的首一约化基。这不是一次理想商：
+    例如 (x*y):x 的商是 (y)，而 (x**2*y):x 的商是 (x*y)，饱和才是 (y)。
+
+    明确边界：
+
+    - f 为零多项式：I:0^inf = (1)（排除 f=0 即排除整个空间）；
+    - f 为非零常数：常数是单位，c**k * g 属于 I 当且仅当 g 属于 I，
+      故饱和等于原理想 I 本身；
+    - 零理想（生成元全为零或为空序列）：被非零 f 饱和仍是零理想；
+    - 单位理想：饱和仍是单位理想。
+
+    变量数上限：原理想至多 MAX_VARIABLES - 1 个变量（辅助变量 t 占一位）。
+    预算语义与 groebner_basis 相同；任一阶段耗尽返回 incomplete。
+    """
+    max_pairs = _check_budget(max_pairs, "max_pairs")
+    max_terms = _check_budget(max_terms, "max_terms")
+    max_steps = _check_budget(max_steps, "max_steps")
+    if not isinstance(f, Poly):
+        raise InvalidPolynomialError(
+            f"饱和多项式 f 必须是 Poly，得到 {type(f).__name__}")
+    if isinstance(generators, Poly):
+        raise InvalidGeneratorError(
+            "generators 必须是 Poly 的序列（收到单个 Poly；请用 [p] 包裹）")
+    if isinstance(generators, (str, bytes)) or not isinstance(generators, Iterable):
+        raise InvalidGeneratorError(
+            f"generators 必须是 Poly 的可迭代序列，得到 {type(generators).__name__}")
+    gens: list[Poly] = []
+    # 扩环系统 I + (1 - t*f) 的输入项数 = 原生成元项数 + len(f) + 1。
+    total_terms = len(f) + 1
+    for idx, g in enumerate(generators):
+        if not isinstance(g, Poly):
+            raise InvalidGeneratorError(
+                f"第 {idx} 个生成元不是 Poly，得到 {type(g).__name__}: {g!r}")
+        if g.n != f.n:
+            raise InvalidGeneratorError(
+                f"第 {idx} 个生成元变量数 {g.n} 与 f 的 {f.n} 不一致")
+        total_terms += len(g)
+        if total_terms > MAX_TOTAL_TERMS:
+            raise InvalidGeneratorError(
+                f"总输入项数（含 1 - t*f）超过上限 {MAX_TOTAL_TERMS}（在 index={idx} "
+                f"处累计 {total_terms}）；请精简输入")
+        gens.append(g)
+    gens_t = tuple(gens)
+    n = f.n
+    m = len(gens_t)
+
+    # f = 0：I:0^inf = (1)。证书取 k=1：f**1 * 1 = 0 恒属于任何理想。
+    if f.is_zero():
+        return SaturationResult("complete", (Poly.constant(1, n),),
+                                (_zero_certs(m, n),), (1,), gens_t, f, True, "")
+    # 零理想被非零 f 饱和仍是零理想（(1 - t*f) 与原环的交只有 0）。
+    if all(g.is_zero() for g in gens_t):
+        return SaturationResult("complete", (), (), (), gens_t, f, True, "")
+    if n + 1 > MAX_VARIABLES:
+        raise InvalidGeneratorError(
+            f"饱和需要引入辅助变量 t：{n} + 1 超过变量数上限 {MAX_VARIABLES}")
+
+    n_ext = n + 1
+    t_var = Poly.variable(n_ext, n)
+    one_minus_tf = Poly.constant(1, n_ext) - t_var * _lift_last(f)
+    ext_gens = tuple(_lift_last(g) for g in gens_t) + (one_minus_tf,)
+    status, basis_e, certs_e, _, _, _, reason = _buchberger_core(
+        ext_gens, n_ext, _elim_key_last, max_pairs, max_terms, max_steps)
+    if status != "complete":
+        return SaturationResult("incomplete", (), None, None,
+                                gens_t, f, False, reason)
+
+    # 消元：该次序下首项不含 t 的基元素整体落在原环中。
+    free: list[Poly] = []
+    free_certs: list[Certificate] = []
+    for b, c in zip(basis_e, certs_e):
+        if max(b.terms, key=_elim_key_last)[-1] == 0:
+            free.append(_drop_last(b))
+            free_certs.append(c)
+    if not free:
+        return SaturationResult("complete", (), (), (), gens_t, f, True, "")
+
+    # 整理为原环 grlex 下唯一的首一约化基（证书相对消元出的生成元）。
+    gb = groebner_basis(free, max_pairs=max_pairs,
+                        max_terms=max_terms, max_steps=max_steps)
+    if not gb.is_complete:
+        return SaturationResult("incomplete", (), None, None,
+                                gens_t, f, False, gb.reason)
+
+    # 组合证书：b = sum_i combo_i * h_i，h_i = sum_j ecert_ij * ext_j，
+    # 故 b = sum_j c_j(x, t) ext_j；再按 t -> 1/f 清分母得到
+    # f**k * b = sum_j cert_j(x) * g_j（1 - t*f 分量自动消去）。
+    all_certs: list[Certificate] = []
+    all_powers: list[int] = []
+    for combo in gb.certificates:
+        cert_ext = [Poly.zero(n_ext) for _ in ext_gens]
+        for coef, ecert in zip(combo, free_certs):
+            for j, c in enumerate(ecert):
+                cert_ext[j] = cert_ext[j] + _lift_last(coef) * c
+        k = 0
+        for c in cert_ext[:m]:
+            for e in c.terms:
+                if e[-1] > k:
+                    k = e[-1]
+        cert_orig = list(_zero_certs(m, n))
+        overflow = False
+        for j in range(m):
+            cert_orig[j] = _clear_t(cert_ext[j], f, k, n)
+            if len(cert_orig[j]) > max_terms:
+                overflow = True
+        if overflow:
+            return SaturationResult(
+                "complete", gb.basis, None, None, gens_t, f, True,
+                f"证书项数超过 max_terms={max_terms} 的预算，仅返回基本身")
+        all_certs.append(tuple(cert_orig))
+        all_powers.append(k)
+    return SaturationResult("complete", gb.basis, tuple(all_certs),
+                            tuple(all_powers), gens_t, f, True, "")

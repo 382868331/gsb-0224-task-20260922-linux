@@ -222,3 +222,122 @@ def expand(cert_dicts, gen_dicts):
     for c, g in zip(cert_dicts, gen_dicts):
         total = add(total, mul(c, g))
     return total
+
+
+# ------------------------------------------------------- 饱和的独立参考实现
+#
+# 与被测 saturate 走同一条数学定理（Rabinowitsch 技巧 + 消元序），
+# 但 Buchberger、消元序、升降变量全部在这里另写一遍朴素版本，
+# 不导入被测核心，因此它给出的饱和基期望不可能“抄自”被测实现。
+
+def _elim_key(exp):
+    """末位变量 t 最大的消元序：先比 t 的次数，再按 grlex 比其余。"""
+    return (exp[-1], key(exp[:-1]))
+
+
+def _remainder_k(f, divisors, k):
+    """任意次序下的朴素首项约化（不做任何跳过判据）。"""
+    r = {}
+    p = f
+    while p:
+        e = max(p, key=k)
+        c = p[e]
+        hit = None
+        for g in divisors:
+            if divides(max(g, key=k), e):
+                hit = g
+                break
+        if hit is None:
+            r = add(r, monom(len(e), e, c))
+            p = sub(p, monom(len(e), e, c))
+        else:
+            ge = max(hit, key=k)
+            gc = hit[ge]
+            shift = tuple(a - b for a, b in zip(e, ge))
+            qterm = monom(len(e), shift, c / gc)
+            p = sub(p, mul(qterm, hit))
+    return r
+
+
+def _s_poly_k(f, g, k):
+    l = lcm_exp(max(f, key=k), max(g, key=k))
+    tf = monom(len(l), tuple(a - b for a, b in zip(l, max(f, key=k))),
+               Fraction(1) / f[max(f, key=k)])
+    tg = monom(len(l), tuple(a - b for a, b in zip(l, max(g, key=k))),
+               Fraction(1) / g[max(g, key=k)])
+    return sub(mul(tf, f), mul(tg, g))
+
+
+def _reduced_gb_k(gens, k):
+    """任意次序下的朴素 Buchberger + 首一约化（结构刻意不同于被测核心）。"""
+    basis = []
+    for g in gens:
+        if not g:
+            continue
+        r = _remainder_k(g, basis, k)
+        if r:
+            basis.append(smul(Fraction(1) / r[max(r, key=k)], r))
+    while True:
+        added = False
+        size = len(basis)
+        for i in range(size):
+            for j in range(i + 1, size):
+                r = _remainder_k(_s_poly_k(basis[i], basis[j], k), basis, k)
+                if r:
+                    basis.append(smul(Fraction(1) / r[max(r, key=k)], r))
+                    added = True
+        if not added:
+            break
+    uniq, seen = [], set()
+    for b in basis:
+        if max(b, key=k) not in seen:
+            seen.add(max(b, key=k))
+            uniq.append(b)
+    minimal = [
+        b for b in uniq
+        if not any(b is not k2 and max(b, key=k) != max(k2, key=k)
+                   and divides(max(k2, key=k), max(b, key=k))
+                   for k2 in uniq)
+    ]
+    reduced = [dict(b) for b in minimal]
+    changed = True
+    while changed:
+        changed = False
+        for pos in range(len(reduced)):
+            others = reduced[:pos] + reduced[pos + 1:]
+            r = _remainder_k(reduced[pos], others, k)
+            r = smul(Fraction(1) / r[max(r, key=k)], r) if r else r
+            if r != reduced[pos]:
+                reduced[pos] = r
+                changed = True
+    reduced.sort(key=lambda b: k(max(b, key=k)), reverse=True)
+    return reduced
+
+
+def saturate_reference(gen_dicts, f_dict):
+    """I:f^inf 的独立期望：返回原环 grlex 首一约化基（dict 列表）。
+
+    边界：f 为零 -> 单位理想；零理想被非零 f 饱和 -> 零理想；
+    非零常数 f -> 原理想（非零常数是单位，不改变理想）。
+    """
+    if f_dict:
+        n = len(next(iter(f_dict)))
+    elif gen_dicts:
+        n = len(next(iter(gen_dicts[0])))
+    else:
+        n = 1
+    if not f_dict:
+        return [{(0,) * n: Fraction(1)}]
+    nonzero = [g for g in gen_dicts if g]
+    if not nonzero:
+        return []
+    lift = lambda g: {e + (0,): c for e, c in g.items()}
+    one_minus_tf = sub(monom(n + 1, (0,) * (n + 1)),
+                       mul(monom(n + 1, (0,) * n + (1,)), lift(f_dict)))
+    ext = [lift(g) for g in nonzero] + [one_minus_tf]
+    gb_ext = _reduced_gb_k(ext, _elim_key)
+    free = [{e[:-1]: c for e, c in g.items()}
+            for g in gb_ext if max(g, key=_elim_key)[-1] == 0]
+    if not free:
+        return []
+    return reduced_groebner(free)

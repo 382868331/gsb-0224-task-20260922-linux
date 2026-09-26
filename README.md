@@ -5,6 +5,9 @@
 算法、唯一的首一约化 Gröbner 基，并为每个基多项式记录它相对输入生成元的
 **多项式线性组合证书**。支持理想成员判定（余式 + 组合证书）与预算耗尽的
 `incomplete` 语义。
+本轮新增 **理想饱和** `saturate(I, f)`：计算 `I:f^∞`（排除 `f=0` 分量后的
+代数约束），用 Rabinowitsch 技巧（辅助变量 `t` 与 `1 - t*f`）加**消元序**
+实现，并为每个输出多项式给出有限 `k` 与 `f**k * g ∈ I` 的组合证书。
 
 **纯 Python 3.14.7 标准库实现**（只用 `fractions`、`dataclasses`、
 `collections` 等），不调用任何符号计算第三方库，离线运行，无网络/账号/
@@ -21,6 +24,16 @@ python -m unittest discover -s tests -v
 
 # 固定输入现场演示（真实计算，约 0.1 秒，远低于 8 秒要求）
 python demo.py
+
+# 饱和功能演示（真实计算正常 + 边界结果，约 0.1 秒，远低于 90 秒）
+python demo_iteration.py
+```
+
+准备虚拟环境（可选；库只用标准库，venv 仅为隔离）：
+
+```bash
+python3.14 -m venv .venv
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 ## 目录结构
@@ -29,14 +42,16 @@ python demo.py
 groebner/
   __init__.py     # 公开接口导出
   poly.py         # Poly：稀疏有理系数多项式、grlex 次序、四则运算
-  groebner.py     # 除法、S 多项式、Buchberger、首一约化基、成员判定、证书
+  groebner.py     # 除法、S 多项式、Buchberger、首一约化基、成员判定、证书、饱和
   errors.py       # 异常类型
 tests/
   reference.py    # 独立朴素参考实现（dict 多项式 + 另写的 Buchberger），
-                  # 不导入被测核心，专门用于给出独立数学期望
+                  # 不导入被测核心，专门用于给出独立数学期望（含饱和参考）
   test_poly.py    # 数据结构/次序/运算/除法/S 多项式测试
   test_groebner.py# Gröbner 基/证书/成员判定/预算/边界测试
+  test_saturate.py# 饱和：手算分量去除、独立参考对照、证书、边界、预算
 demo.py           # 固定输入演示
+demo_iteration.py # 饱和功能演示（本轮新增）
 ```
 
 ## 公开接口
@@ -113,6 +128,34 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
 - `nonmember`：基完整（complete）且余式非零，非零余式即为非成员证据；
 - `inconclusive`：预算在判定前耗尽且余式非零——**不允许**在此时宣称非成员。
 
+### 理想饱和 `saturate`
+
+```python
+from groebner import saturate
+
+r = saturate([x * y], x)          # I = (x*y)，f = x：排除 x=0 分量
+r.status                          # "complete" | "incomplete"
+r.basis                           # I:f^∞ 的首一约化 Gröbner 基（grlex，原变量环）
+r.powers                          # 每个基多项式 g_i 对应的有限 k_i
+r.certificates                    # f**k_i * g_i = sum_j cert_ij * 输入生成元_j
+```
+
+- 数学定义：`I:f^∞ = {g : 存在 k ≥ 0 使 f**k * g ∈ I}`，即排除 `f=0` 分量后
+  剩余部分的代数约束。实现用 Rabinowitsch 技巧：扩环中加入辅助变量 `t` 与
+  `1 - t*f`，关于 **t 最大的消元序**（先比 t 次数，再按 grlex）求约化基，
+  取不含 `t` 的元素即得饱和；**不是**一次理想商（`(x²y):x = (xy)`，而饱和
+  是 `(y)`）。辅助变量 `t` 不会泄漏到任何公开多项式中。
+- 明确边界：`f = 0` → 单位理想 `(1)`（排除整个空间）；`f` 为非零常数 →
+  原理想本身（常数是单位）；零理想（含空生成元序列）→ 零理想；
+  单位理想 → 单位理想。
+- 证书：每个输出 `g_i` 带有限 `k_i` 与相对**原始输入生成元**的组合证书，
+  满足 `f**k_i * g_i = Σ_j cert_ij * g_j`，可独立展开核验。若证书项数超过
+  `max_terms` 预算，则 `certificates`/`powers` 为 `None`、`reason` 单独说明，
+  但 `basis` 仍是有效的完整结果。
+- 变量数限制：原理想至多 `MAX_VARIABLES - 1 = 3` 个变量（辅助变量 `t` 占一位），
+  超出抛 `InvalidGeneratorError`；预算语义与 `groebner_basis` 相同，
+  耗尽返回 `status="incomplete"`，不宣称任何结论。
+
 ### 异常
 
 | 异常 | 触发情形 |
@@ -187,7 +230,10 @@ m.certificate  # member 时：f = sum_j certificate[j] * g_j；否则为 None
 - 只支持有理数域 Q、grlex 一种次序、1–4 个变量、总输入项 ≤ 100；
   不宣称兼容其他项序、域（有限域/代数扩域）或行业标准 CAS 行为。
 - 不实现 Gröbner 扇、模块/非交换 Gröbner 基、根理想、消元序专门接口
-  （grlex 下消元关系可通过成员判定与证书展示，见 `demo.py`）。
+  （消元序仅在 `saturate` 内部用于消去辅助变量 `t`，不对外提供任意次序接口；
+  grlex 下消元关系可通过成员判定与证书展示，见 `demo.py`）。
+- 饱和 `saturate` 因需引入辅助变量，原理想限 3 个变量以内；证书在
+  `max_terms` 内给出，超出时单独说明（基仍有效）。
 - 中间多项式项数与初等约化步数都可能很大；受 `max_pairs`、`max_terms`、
   `max_steps` 三重预算约束，超出时结果为 `incomplete`/`inconclusive`，
   需要调用方调大对应预算重算。
