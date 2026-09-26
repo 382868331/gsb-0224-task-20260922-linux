@@ -7,6 +7,7 @@
 - Groebner 基：:func:`groebner_basis`、:func:`groebner_basis_of_zero`、
   :func:`check_s_polynomials`、:func:`verify_groebner_basis`；
 - 理想成员：:func:`membership`、:func:`membership_in_zero_ideal`；
+- 理想饱和：:func:`saturate`（辅助变量消元序内部实现，公开次序仍 grlex）；
 - 结果对象：:class:`DivisionResult`、:class:`GroebnerResult`、
   :class:`MembershipResult`；
 - 异常：:class:`GroebnerError`、:class:`InvalidPolynomialError`、
@@ -32,6 +33,8 @@ from .groebner import (
     DivisionResult,
     GroebnerResult,
     MembershipResult,
+    SaturationCertificate,
+    SaturationResult,
     check_s_polynomials,
     divide,
     groebner_basis,
@@ -39,6 +42,7 @@ from .groebner import (
     membership,
     membership_in_zero_ideal,
     s_polynomial,
+    saturate,
     verify_groebner_basis,
 )
 from .poly import MAX_TOTAL_TERMS, MAX_VARIABLES, Poly, grlex_key, lcm_monomial
@@ -60,9 +64,12 @@ __all__ = [
     "verify_groebner_basis",
     "membership",
     "membership_in_zero_ideal",
+    "saturate",
     "DivisionResult",
     "GroebnerResult",
     "MembershipResult",
+    "SaturationCertificate",
+    "SaturationResult",
     "GroebnerError",
     "InvalidPolynomialError",
     "InvalidGeneratorError",
